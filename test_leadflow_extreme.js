@@ -37,7 +37,10 @@ async function runExtremeTests() {
     }
 
     console.log("Test 4: Testing Formal Sales Transcript Engine...");
-    const transcriptRes = await processSalesTranscript(1, "Had executive briefing with client. Contract signed, payment received in full.");
+    // Use a live lead id — leadflow.db persists across runs so hardcoded id=1 may not exist.
+    const idProbe = db.exec("SELECT id FROM leads ORDER BY id LIMIT 1;");
+    const transcriptLeadId = (idProbe.length && idProbe[0].values.length) ? idProbe[0].values[0][0] : 1;
+    const transcriptRes = await processSalesTranscript(transcriptLeadId, "Had executive briefing with client. Contract signed, payment received in full.");
     console.log(`- Updated Stage: ${transcriptRes.updatedStage}`);
     if (transcriptRes.updatedStage === "Contract Signed") {
       console.log("✅ Formal Sales Transcript Engine passed.\n");

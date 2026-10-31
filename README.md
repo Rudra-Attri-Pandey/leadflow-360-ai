@@ -9,6 +9,23 @@ LeadFlow 360 AI is an enterprise-grade AI Inbound Lead Qualification, 128-dimens
 
 ---
 
+## ✅ Stress-tested
+
+**15/15 stress tests passing** — run with `npm test` (runs `node test_leadflow_no_mercy.js`).
+
+- **Injection attacks**: XSS (`<script>alert('xss_attack')</script>`), SQLi (`'; DROP TABLE leads; ...`), and unicode/emoji payloads are stored safely via parameterized inserts; the table-survival check passes.
+- **Budget regex**: `Rs 1,50,000` → ₹150000, `50k INR` → ₹50000, `$12,000 USD` → ₹12000, no-budget text → ₹50000 fallback.
+- **Batch speed (last green run)**: 100 leads ingested in **510ms** (assert < 1000ms). The suite prints a cumulative DB count (**404** rows here) because `leadflow.db` persists across runs.
+- **Mutation storm (last green run)**: 500 stage transitions in **1479ms** (assert < 1500ms) with deterministic final stage `Archived / Lost`. Honest note: timings vary by machine and DB size — earlier runs measured 157–510ms (batch) and 374–1479ms (mutations), so the mutation check runs close to its threshold on large DBs and can be flaky.
+- **Transcript stages**: won → `Contract Signed`, negotiation → `Proposal & Negotiation`, lost → `Archived / Lost`.
+- No tests skipped. Legacy `test_leadflow_extreme.js` (5 checks: score math, extraction, transcript, DB count) also passes but is not wired to `npm test`.
+
+```bash
+npm test
+```
+
+---
+
 ## 🌟 Key Features & Capabilities
 
 - **📥 Multi-Channel Inbound Lead Ingestion**: Register raw client specs from Web Forms, WhatsApp messages, or Email inquiries.
@@ -61,3 +78,8 @@ Runs 15+ extreme automated stress tests verifying DB survival under SQL Injectio
 ## 📄 License & Attribution
 
 MIT License 2026 **VoidReformer**. Created by VoidReformer.
+
+---
+
+## Demo data note
+Demo mode — your data lives in temporary storage and resets when the server restarts or redeploys. Connect a persistent database (e.g. Supabase Postgres) for production.

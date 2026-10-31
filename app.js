@@ -17,14 +17,40 @@ function calculateLeadScore(budget, urgency, textLength) {
   return Math.min(100, Math.max(10, score));
 }
 
+// Strict positive-integer guard: prevents unfiltered/wrong-lead lookups.
+function validateLeadId(leadId) {
+  const n = Number(leadId);
+  if (!Number.isInteger(n) || n <= 0) {
+    const err = new Error(`Invalid lead ID: ${leadId}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return n;
+}
+
+function extractPhoneDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
 // Formal AI Extraction & Intent Engine
-async function analyzeLeadText(rawText, providedName = "", providedContact = "") {
+async function analyzeLeadText(rawText, providedName = "", providedContact = "", providedPhone = "") {
   let name = providedName || "Inbound Enterprise Prospect";
   let contact = providedContact || "Contact Pending";
   let channel = "Web Inbound";
   let intent_summary = rawText.substring(0, 120) + "...";
   let budget_val = 50000;
   let urgency = "Medium";
+
+  // Phone: explicit field first, then phone-like contact, then raw-text scan.
+  let phone = String(providedPhone || '').trim();
+  if (!phone && providedContact && /\+?\d[\d\s\-()]{6,}\d/.test(String(providedContact))) {
+    phone = String(providedContact).trim();
+  }
+  if (!phone) {
+    const m = String(rawText || '').match(/\+?\d[\d\s\-()]{6,}\d/);
+    if (m) phone = m[0].trim();
+  }
+  const phone_digits = extractPhoneDigits(phone);
 
   const budgetMatch = rawText.match(/(?:budget|rs|inr|₹|\$)\s*[:=]?\s*([\d,]+k?)/i);
   if (budgetMatch) {
@@ -64,6 +90,8 @@ async function analyzeLeadText(rawText, providedName = "", providedContact = "")
   return {
     name,
     contact,
+    phone,
+    phone_digits,
     channel,
     raw_text: rawText,
     intent_summary,
@@ -79,10 +107,21 @@ async function analyzeLeadText(rawText, providedName = "", providedContact = "")
 
 // Formal Sales Transcript Processing Engine
 async function processSalesTranscript(leadId, transcriptText) {
+  const id = validateLeadId(leadId);
   const db = await initDB();
-  const res = db.exec("SELECT * FROM leads WHERE id = ?;", [leadId]);
-  if (!res.length || !res[0].values.length) {
-    throw new Error(`Lead with ID ${leadId} not found`);
+  // sql.js db.exec() takes NO bind params — the old
+  // db.exec("... WHERE id = ?", [leadId]) silently ignored the filter and
+  // could resolve to the wrong lead. Use prepare()+bind()+getAsObject().
+  const stmt = db.prepare("SELECT * FROM leads WHERE id = ?;");
+  stmt.bind([id]);
+  let lead = null;
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    if (row && row.id !== null && typeof row.id !== 'undefined') lead = row;
+  }
+  stmt.free();
+  if (!lead) {
+    throw new Error(`Lead with ID ${id} not found`);
   }
 
   let updatedStage = "SQL (Sales Qualified)";
@@ -97,19 +136,21 @@ async function processSalesTranscript(leadId, transcriptText) {
   const summary = `Executive Briefing Processed: ${transcriptText.substring(0, 110)}...`;
 
   db.run("UPDATE leads SET stage = ?, intent_summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", [
-    updatedStage, summary, leadId
+    updatedStage, summary, id
   ]);
 
   db.run("INSERT INTO activities (lead_id, action, details) VALUES (?, ?, ?);", [
-    leadId, "Executive Insights Processed", `Stage updated to ${updatedStage}`
+    id, "Executive Insights Processed", `Stage updated to ${updatedStage}`
   ]);
 
   saveDB();
-  return { leadId, updatedStage, summary };
+  return { leadId: id, updatedStage, summary };
 }
 
 module.exports = {
   calculateLeadScore,
   analyzeLeadText,
-  processSalesTranscript
+  processSalesTranscript,
+  validateLeadId,
+  extractPhoneDigits
 };

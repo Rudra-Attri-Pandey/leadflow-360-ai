@@ -5,3 +5,10 @@ leadflow.db
 .DS_Store
 
 .vercel
+
+# deploy hygiene (auto-added)
+.env.local
+data/
+*.db
+*.sqlite3
+__pycache__/

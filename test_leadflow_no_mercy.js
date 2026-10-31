@@ -115,19 +115,24 @@ async function runNoMercyHardcoreTests() {
     console.log("📌 STRESS TEST 4: Rapid Stage Mutation Stress (500 State Changes)...");
 
     const stages = ["Lead Ingestion", "SQL (Sales Qualified)", "Proposal & Negotiation", "Contract Signed", "Archived / Lost"];
+    // Use a live lead id instead of hardcoded 1 — leadflow.db persists across
+    // runs and id=1 may have been deleted, which made the suite crash here.
+    const idProbe = db.exec("SELECT id FROM leads ORDER BY id LIMIT 1;");
+    const targetLeadId = (idProbe.length && idProbe[0].values.length) ? idProbe[0].values[0][0] : 1;
+    console.log(`  ℹ️ Using lead id=${targetLeadId} for mutation/transcript stages`);
     const mutStart = Date.now();
 
     for (let i = 0; i < 500; i++) {
       const targetStage = stages[i % stages.length];
-      db.run("UPDATE leads SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1;", [targetStage]);
+      db.run("UPDATE leads SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", [targetStage, targetLeadId]);
     }
     saveDB();
 
     const mutDuration = Date.now() - mutStart;
     assert(mutDuration < 1500, `500 Rapid Stage Mutations executed cleanly in ${mutDuration}ms!`);
 
-    const lead1Res = db.exec("SELECT stage FROM leads WHERE id = 1;");
-    assert(lead1Res[0].values[0][0] === stages[499 % stages.length], `Final lead stage state deterministic: ${lead1Res[0].values[0][0]}`);
+    const lead1Res = db.exec(`SELECT stage FROM leads WHERE id = ${Number(targetLeadId)};`);
+    assert(lead1Res.length && lead1Res[0].values.length && lead1Res[0].values[0][0] === stages[499 % stages.length], `Final lead stage state deterministic: ${lead1Res.length && lead1Res[0].values.length ? lead1Res[0].values[0][0] : 'MISSING'}`);
     console.log("");
 
     // ----------------------------------------------------------------------
@@ -136,15 +141,15 @@ async function runNoMercyHardcoreTests() {
     console.log("📌 STRESS TEST 5: Transcript Analysis & Sentiment Stress...");
 
     // Test Won transcript
-    const tWon = await processSalesTranscript(1, "Executive briefing completed. Client accepted proposal, signed contract, payment completed.");
+    const tWon = await processSalesTranscript(targetLeadId, "Executive briefing completed. Client accepted proposal, signed contract, payment completed.");
     assert(tWon.updatedStage === "Contract Signed", "Won Transcript correctly moved lead to 'Contract Signed'");
 
     // Test Negotiation transcript
-    const tNeg = await processSalesTranscript(1, "Client requested custom SLA clauses. Sent revised proposal for review next week.");
+    const tNeg = await processSalesTranscript(targetLeadId, "Client requested custom SLA clauses. Sent revised proposal for review next week.");
     assert(tNeg.updatedStage === "Proposal & Negotiation", "Negotiation Transcript correctly moved lead to 'Proposal & Negotiation'");
 
     // Test Lost transcript
-    const tLost = await processSalesTranscript(1, "Client cancelled project due to internal restructuring. Unqualified lead.");
+    const tLost = await processSalesTranscript(targetLeadId, "Client cancelled project due to internal restructuring. Unqualified lead.");
     assert(tLost.updatedStage === "Archived / Lost", "Lost Transcript correctly moved lead to 'Archived / Lost'");
     console.log("");
 

@@ -7,7 +7,21 @@ const { analyzeLeadText, processSalesTranscript } = require('./app');
 const app = express();
 const PORT = process.env.PORT || 3005;
 
-app.use(cors());
+const API_KEY = process.env.API_KEY;
+if (!API_KEY) {
+  console.warn('[WARN] API_KEY is not set — running in demo mode without API-key auth. Set API_KEY to protect mutating routes.');
+}
+
+function requireApiKey(req, res, next) {
+  if (!API_KEY) return next(); // demo mode: no key configured, allow
+  const provided = req.headers['x-api-key'];
+  if (!provided || provided !== API_KEY) {
+    return res.status(401).json({ success: false, error: 'Invalid or missing API key' });
+  }
+  next();
+}
+
+app.use(cors({ origin: (process.env.CORS_ORIGINS || 'http://localhost:3005').split(',') }));
 app.use(express.json());
 
 // Serve static assets with explicit root dir
@@ -29,6 +43,9 @@ app.get('/api/leads', async (req, res) => {
         if (obj.next_followup) {
           obj.is_overdue = new Date(obj.next_followup) < new Date() && obj.stage !== 'Contract Signed' && obj.stage !== 'Archived / Lost';
         }
+        if (typeof obj.phone !== 'undefined') {
+          obj.phone_digits = String(obj.phone || '').replace(/\D/g, '');
+        }
         return obj;
       });
     }
@@ -48,21 +65,30 @@ app.get('/api/leads', async (req, res) => {
 
 app.post('/api/leads/ingest', async (req, res) => {
   try {
-    const { raw_text, name, contact } = req.body;
+    const { raw_text, name, contact, phone } = req.body;
     if (!raw_text) {
       return res.status(400).json({ success: false, error: "raw_text is required" });
     }
+    if (typeof name === 'string' && name.length > 500) {
+      return res.status(400).json({ success: false, error: "name exceeds maximum length of 500 characters" });
+    }
+    if (typeof contact === 'string' && contact.length > 500) {
+      return res.status(400).json({ success: false, error: "contact exceeds maximum length of 500 characters" });
+    }
+    if (typeof phone === 'string' && phone.length > 30) {
+      return res.status(400).json({ success: false, error: "phone exceeds maximum length of 30 characters" });
+    }
 
-    const analyzed = await analyzeLeadText(raw_text, name, contact);
+    const analyzed = await analyzeLeadText(raw_text, name, contact, phone);
     const db = await initDB();
 
     const stmt = db.prepare(`
-      INSERT INTO leads (name, contact, channel, raw_text, intent_summary, budget_val, urgency, score, stage, email_draft, whatsapp_draft, next_followup)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      INSERT INTO leads (name, contact, phone, channel, raw_text, intent_summary, budget_val, urgency, score, stage, email_draft, whatsapp_draft, next_followup)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     `);
 
     stmt.run([
-      analyzed.name, analyzed.contact, analyzed.channel, analyzed.raw_text,
+      analyzed.name, analyzed.contact, analyzed.phone || '', analyzed.channel, analyzed.raw_text,
       analyzed.intent_summary, analyzed.budget_val, analyzed.urgency,
       analyzed.score, analyzed.stage, analyzed.email_draft,
       analyzed.whatsapp_draft, analyzed.next_followup
@@ -76,9 +102,17 @@ app.post('/api/leads/ingest', async (req, res) => {
   }
 });
 
-app.put('/api/leads/:id/stage', async (req, res) => {
+function validateRouteId(id) {
+  const n = Number(id);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+app.put('/api/leads/:id/stage', requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
+    if (validateRouteId(id) === null) {
+      return res.status(400).json({ success: false, error: "Invalid lead ID: must be a positive integer" });
+    }
     const { stage } = req.body;
     const validStages = [
       "Lead Ingestion",
@@ -108,6 +142,9 @@ app.put('/api/leads/:id/stage', async (req, res) => {
 app.post('/api/leads/:id/transcript', async (req, res) => {
   try {
     const { id } = req.params;
+    if (validateRouteId(id) === null) {
+      return res.status(400).json({ success: false, error: "Invalid lead ID: must be a positive integer" });
+    }
     const { transcript } = req.body;
     if (!transcript) {
       return res.status(400).json({ success: false, error: "transcript text is required" });
@@ -116,13 +153,19 @@ app.post('/api/leads/:id/transcript', async (req, res) => {
     const result = await processSalesTranscript(id, transcript);
     res.json({ success: true, result });
   } catch (err) {
+    if (err && err.statusCode === 400) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.delete('/api/leads/:id', async (req, res) => {
+app.delete('/api/leads/:id', requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
+    if (validateRouteId(id) === null) {
+      return res.status(400).json({ success: false, error: "Invalid lead ID: must be a positive integer" });
+    }
     const db = await initDB();
     db.run("DELETE FROM leads WHERE id = ?;", [id]);
     saveDB();
