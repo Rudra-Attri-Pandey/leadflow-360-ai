@@ -1,5 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { sbConfigured, sbInsert, sbList, sbGet, sbUpdate, sbDeleteWhere, sbRequest } = require('./supabase');
+
+// Supabase PostgREST table names (dual-mode: used only when sbConfigured())
+const T_LEADS = 'leadflow_leads';
+const T_ACTIVITIES = 'leadflow_activities';
 
 let initSqlJs = null;
 try {
@@ -184,4 +190,114 @@ function saveDB() {
   }
 }
 
-module.exports = { initDB, saveDB };
+// Which store is active for this process.
+function storeMode() {
+  return sbConfigured() ? 'supabase' : 'sqlite';
+}
+
+// ---- Async lead helpers (dual-mode: PostgREST when configured, else sql.js/memory) ----
+
+async function listLeads() {
+  if (sbConfigured()) {
+    return sbList(T_LEADS, { order: 'score.desc,created_at.desc' });
+  }
+  const database = await initDB();
+  const result = database.exec("SELECT * FROM leads ORDER BY score DESC, id DESC;");
+  if (!result.length || !result[0].values) return [];
+  const columns = result[0].columns;
+  return result[0].values.map(row => {
+    const obj = {};
+    columns.forEach((col, idx) => { obj[col] = row[idx]; });
+    return obj;
+  });
+}
+
+async function getLeadById(id) {
+  if (sbConfigured()) {
+    return (await sbGet(T_LEADS, id)) || null;
+  }
+  const database = await initDB();
+  const n = Number(id);
+  const stmt = database.prepare("SELECT * FROM leads WHERE id = ?;");
+  stmt.bind([n]);
+  let lead = null;
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    if (row && row.id !== null && typeof row.id !== 'undefined') lead = row;
+  }
+  stmt.free();
+  return lead;
+}
+
+async function insertLead(a) {
+  if (sbConfigured()) {
+    return sbInsert(T_LEADS, {
+      name: a.name,
+      contact: a.contact,
+      phone: a.phone || '',
+      channel: a.channel,
+      raw_text: a.raw_text,
+      intent_summary: a.intent_summary,
+      budget_val: a.budget_val,
+      urgency: a.urgency,
+      score: a.score,
+      stage: a.stage,
+      email_draft: a.email_draft,
+      whatsapp_draft: a.whatsapp_draft,
+      next_followup: a.next_followup
+    });
+  }
+  const database = await initDB();
+  const stmt = database.prepare(`
+    INSERT INTO leads (name, contact, phone, channel, raw_text, intent_summary, budget_val, urgency, score, stage, email_draft, whatsapp_draft, next_followup)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+  `);
+  stmt.run([
+    a.name, a.contact, a.phone || '', a.channel, a.raw_text,
+    a.intent_summary, a.budget_val, a.urgency,
+    a.score, a.stage, a.email_draft, a.whatsapp_draft, a.next_followup
+  ]);
+  stmt.free();
+  saveDB();
+  return a;
+}
+
+async function updateLeadStage(id, stage, intentSummary) {
+  if (sbConfigured()) {
+    const patch = { stage, updated_at: new Date().toISOString() };
+    if (typeof intentSummary !== 'undefined') patch.intent_summary = intentSummary;
+    await sbUpdate(T_LEADS, id, patch);
+    return;
+  }
+  const database = await initDB();
+  if (typeof intentSummary !== 'undefined') {
+    database.run("UPDATE leads SET stage = ?, intent_summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", [stage, intentSummary, id]);
+  } else {
+    database.run("UPDATE leads SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", [stage, id]);
+  }
+  saveDB();
+}
+
+async function deleteLead(id) {
+  if (sbConfigured()) {
+    await sbDeleteWhere(T_ACTIVITIES, { lead_id: `eq.${id}` });
+    await sbDeleteWhere(T_LEADS, { id: `eq.${id}` });
+    return;
+  }
+  const database = await initDB();
+  database.run("DELETE FROM activities WHERE lead_id = ?;", [id]);
+  database.run("DELETE FROM leads WHERE id = ?;", [id]);
+  saveDB();
+}
+
+async function addActivity(leadId, action, details) {
+  if (sbConfigured()) {
+    await sbInsert(T_ACTIVITIES, { lead_id: leadId, action, details: details || null });
+    return;
+  }
+  const database = await initDB();
+  database.run("INSERT INTO activities (lead_id, action, details) VALUES (?, ?, ?);", [leadId, action, details]);
+  saveDB();
+}
+
+module.exports = { initDB, saveDB, storeMode, listLeads, getLeadById, insertLead, updateLeadStage, deleteLead, addActivity };

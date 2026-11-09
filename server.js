@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { initDB, saveDB } = require('./db');
+const { initDB, saveDB, storeMode, listLeads, insertLead, updateLeadStage, deleteLead, addActivity } = require('./db');
 const { analyzeLeadText, processSalesTranscript } = require('./app');
 
 const app = express();
@@ -29,26 +29,16 @@ app.use(express.static(path.join(__dirname)));
 
 app.get('/api/leads', async (req, res) => {
   try {
-    const db = await initDB();
-    const result = db.exec("SELECT * FROM leads ORDER BY score DESC, id DESC;");
-    
-    let leads = [];
-    if (result.length > 0) {
-      const columns = result[0].columns;
-      leads = result[0].values.map(row => {
-        let obj = {};
-        columns.forEach((col, idx) => {
-          obj[col] = row[idx];
-        });
-        if (obj.next_followup) {
-          obj.is_overdue = new Date(obj.next_followup) < new Date() && obj.stage !== 'Contract Signed' && obj.stage !== 'Archived / Lost';
-        }
-        if (typeof obj.phone !== 'undefined') {
-          obj.phone_digits = String(obj.phone || '').replace(/\D/g, '');
-        }
-        return obj;
-      });
-    }
+    const leads = await listLeads();
+
+    leads.forEach(obj => {
+      if (obj.next_followup) {
+        obj.is_overdue = new Date(obj.next_followup) < new Date() && obj.stage !== 'Contract Signed' && obj.stage !== 'Archived / Lost';
+      }
+      if (typeof obj.phone !== 'undefined') {
+        obj.phone_digits = String(obj.phone || '').replace(/\D/g, '');
+      }
+    });
 
     const stats = {
       totalLeads: leads.length,
@@ -57,7 +47,7 @@ app.get('/api/leads', async (req, res) => {
       overdueAlerts: leads.filter(l => l.is_overdue).length
     };
 
-    res.json({ success: true, stats, leads });
+    res.json({ success: true, stats, leads, store: storeMode() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -80,38 +70,26 @@ app.post('/api/leads/ingest', async (req, res) => {
     }
 
     const analyzed = await analyzeLeadText(raw_text, name, contact, phone);
-    const db = await initDB();
+    const saved = await insertLead(analyzed);
 
-    const stmt = db.prepare(`
-      INSERT INTO leads (name, contact, phone, channel, raw_text, intent_summary, budget_val, urgency, score, stage, email_draft, whatsapp_draft, next_followup)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-    `);
-
-    stmt.run([
-      analyzed.name, analyzed.contact, analyzed.phone || '', analyzed.channel, analyzed.raw_text,
-      analyzed.intent_summary, analyzed.budget_val, analyzed.urgency,
-      analyzed.score, analyzed.stage, analyzed.email_draft,
-      analyzed.whatsapp_draft, analyzed.next_followup
-    ]);
-    stmt.free();
-    saveDB();
-
-    res.json({ success: true, message: "Lead ingested & qualified", lead: analyzed });
+    res.json({ success: true, message: "Lead ingested & qualified", lead: analyzed, id: saved ? saved.id : undefined, store: storeMode() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 function validateRouteId(id) {
-  const n = Number(id);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  const s = String(id || '');
+  if (/^\d+$/.test(s) && Number(s) > 0) return s;               // legacy integer id (dev mode)
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s)) return s; // uuid (Supabase)
+  return null;
 }
 
 app.put('/api/leads/:id/stage', requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
-    if (validateRouteId(id) === null) {
-      return res.status(400).json({ success: false, error: "Invalid lead ID: must be a positive integer" });
+    if (!validateRouteId(id)) {
+      return res.status(400).json({ success: false, error: "Invalid lead ID" });
     }
     const { stage } = req.body;
     const validStages = [
@@ -126,12 +104,8 @@ app.put('/api/leads/:id/stage', requireApiKey, async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid pipeline stage" });
     }
 
-    const db = await initDB();
-    db.run("UPDATE leads SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", [stage, id]);
-    db.run("INSERT INTO activities (lead_id, action, details) VALUES (?, ?, ?);", [
-      id, "Stage Updated", `Pipeline stage changed to ${stage}`
-    ]);
-    saveDB();
+    await updateLeadStage(id, stage);
+    await addActivity(id, "Stage Updated", `Pipeline stage changed to ${stage}`);
 
     res.json({ success: true, message: `Pipeline stage updated to ${stage}` });
   } catch (err) {
@@ -142,8 +116,8 @@ app.put('/api/leads/:id/stage', requireApiKey, async (req, res) => {
 app.post('/api/leads/:id/transcript', async (req, res) => {
   try {
     const { id } = req.params;
-    if (validateRouteId(id) === null) {
-      return res.status(400).json({ success: false, error: "Invalid lead ID: must be a positive integer" });
+    if (!validateRouteId(id)) {
+      return res.status(400).json({ success: false, error: "Invalid lead ID" });
     }
     const { transcript } = req.body;
     if (!transcript) {
@@ -163,12 +137,10 @@ app.post('/api/leads/:id/transcript', async (req, res) => {
 app.delete('/api/leads/:id', requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
-    if (validateRouteId(id) === null) {
-      return res.status(400).json({ success: false, error: "Invalid lead ID: must be a positive integer" });
+    if (!validateRouteId(id)) {
+      return res.status(400).json({ success: false, error: "Invalid lead ID" });
     }
-    const db = await initDB();
-    db.run("DELETE FROM leads WHERE id = ?;", [id]);
-    saveDB();
+    await deleteLead(id);
     res.json({ success: true, message: "Lead record deleted" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

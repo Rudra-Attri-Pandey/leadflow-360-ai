@@ -1,9 +1,9 @@
-const { initDB, saveDB } = require('./db');
+const { getLeadById, updateLeadStage, addActivity } = require('./db');
 
 // Formal Lead Scoring Math Engine
 function calculateLeadScore(budget, urgency, textLength) {
   let score = 40;
-  
+
   if (budget >= 200000) score += 35;
   else if (budget >= 100000) score += 25;
   else if (budget >= 50000) score += 15;
@@ -17,15 +17,15 @@ function calculateLeadScore(budget, urgency, textLength) {
   return Math.min(100, Math.max(10, score));
 }
 
-// Strict positive-integer guard: prevents unfiltered/wrong-lead lookups.
+// Strict id guard: positive integer (dev mode) or uuid (Supabase mode).
+// Prevents unfiltered/wrong-lead lookups.
 function validateLeadId(leadId) {
-  const n = Number(leadId);
-  if (!Number.isInteger(n) || n <= 0) {
-    const err = new Error(`Invalid lead ID: ${leadId}`);
-    err.statusCode = 400;
-    throw err;
-  }
-  return n;
+  const s = String(leadId || '');
+  if (/^\d+$/.test(s) && Number(s) > 0) return s;
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s)) return s;
+  const err = new Error(`Invalid lead ID: ${leadId}`);
+  err.statusCode = 400;
+  throw err;
 }
 
 function extractPhoneDigits(value) {
@@ -108,18 +108,7 @@ async function analyzeLeadText(rawText, providedName = "", providedContact = "",
 // Formal Sales Transcript Processing Engine
 async function processSalesTranscript(leadId, transcriptText) {
   const id = validateLeadId(leadId);
-  const db = await initDB();
-  // sql.js db.exec() takes NO bind params — the old
-  // db.exec("... WHERE id = ?", [leadId]) silently ignored the filter and
-  // could resolve to the wrong lead. Use prepare()+bind()+getAsObject().
-  const stmt = db.prepare("SELECT * FROM leads WHERE id = ?;");
-  stmt.bind([id]);
-  let lead = null;
-  if (stmt.step()) {
-    const row = stmt.getAsObject();
-    if (row && row.id !== null && typeof row.id !== 'undefined') lead = row;
-  }
-  stmt.free();
+  const lead = await getLeadById(id);
   if (!lead) {
     throw new Error(`Lead with ID ${id} not found`);
   }
@@ -135,15 +124,9 @@ async function processSalesTranscript(leadId, transcriptText) {
 
   const summary = `Executive Briefing Processed: ${transcriptText.substring(0, 110)}...`;
 
-  db.run("UPDATE leads SET stage = ?, intent_summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", [
-    updatedStage, summary, id
-  ]);
+  await updateLeadStage(id, updatedStage, summary);
+  await addActivity(id, "Executive Insights Processed", `Stage updated to ${updatedStage}`);
 
-  db.run("INSERT INTO activities (lead_id, action, details) VALUES (?, ?, ?);", [
-    id, "Executive Insights Processed", `Stage updated to ${updatedStage}`
-  ]);
-
-  saveDB();
   return { leadId: id, updatedStage, summary };
 }
 
