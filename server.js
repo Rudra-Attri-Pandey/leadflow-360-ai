@@ -24,6 +24,14 @@ function requireApiKey(req, res, next) {
 app.use(cors({ origin: (process.env.CORS_ORIGINS || 'http://localhost:3005').split(',') }));
 app.use(express.json());
 
+// Sensitive-file guard: never expose source, stores, or env files (static
+// serving below serves the project dir, so block internals explicitly).
+const SENSITIVE = /(^|\/)(server|db|supabase)\.js$|(^|\/)\.env(\.|$)|\.db$|\.sqlite3?$|(^|\/)package(-lock)?\.json$|(^|\/)\.git/i;
+app.use((req, res, next) => {
+  if (SENSITIVE.test(req.path)) return res.status(404).json({ error: 'Not found' });
+  next();
+});
+
 // Serve static assets with explicit root dir
 app.use(express.static(path.join(__dirname)));
 
